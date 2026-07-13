@@ -16,6 +16,8 @@ from .model_inspector                import NODE_CLASS_MAPPINGS as _NCM_INSPECT,
 from .model_forward_probe            import NODE_CLASS_MAPPINGS as _NCM_PROBE,         NODE_DISPLAY_NAME_MAPPINGS as _NDM_PROBE
 from .ltx_reference_enable           import NODE_CLASS_MAPPINGS as _NCM_LTX_REF_EN,    NODE_DISPLAY_NAME_MAPPINGS as _NDM_LTX_REF_EN
 from .ltx_reference_conditioning     import NODE_CLASS_MAPPINGS as _NCM_LTX_REF_CND,   NODE_DISPLAY_NAME_MAPPINGS as _NDM_LTX_REF_CND
+from .ltx_face_identity_reinforcer   import NODE_CLASS_MAPPINGS as _NCM_LTX_REINF,    NODE_DISPLAY_NAME_MAPPINGS as _NDM_LTX_REINF
+from .activation_calibrator          import NODE_CLASS_MAPPINGS as _NCM_CALIB,         NODE_DISPLAY_NAME_MAPPINGS as _NDM_CALIB
 
 NODE_CLASS_MAPPINGS = {
     **_NCM_NODES,
@@ -36,6 +38,8 @@ NODE_CLASS_MAPPINGS = {
     **_NCM_PROBE,
     **_NCM_LTX_REF_EN,
     **_NCM_LTX_REF_CND,
+    **_NCM_LTX_REINF,
+    **_NCM_CALIB,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -57,8 +61,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_NDM_PROBE,
     **_NDM_LTX_REF_EN,
     **_NDM_LTX_REF_CND,
+    **_NDM_LTX_REINF,
+    **_NDM_CALIB,
 }
 
-__version__ = "1.9.2"
+__version__ = "1.9.4"
 WEB_DIRECTORY = "./web"
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY', '__version__']

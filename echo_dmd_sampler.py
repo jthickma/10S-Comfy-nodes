@@ -18,10 +18,13 @@ Add to your NODE_CLASS_MAPPINGS / NODE_DISPLAY_NAME_MAPPINGS as usual.
 
 from __future__ import annotations
 
+import time
 import torch
+from tqdm.auto import tqdm
 import comfy.samplers
 import comfy.sample
 import comfy.model_patcher
+import comfy.utils
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,22 +277,45 @@ def _sample_echo_dmd(
     extra_args = extra_args or {}
     s_in = x.new_ones([x.shape[0]])
 
-    for i in range(len(sigmas) - 1):
-        sigma      = sigmas[i].item()
-        sigma_next = sigmas[i + 1].item()
+    steps = len(sigmas) - 1
+    pbar = comfy.utils.ProgressBar(steps)
+    pbar_tqdm = tqdm(
+        total=steps,
+        leave=True,
+        disable=disable,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
+    )
 
-        denoised = model(x, sigma * s_in, **extra_args)
+    try:
+        for i in range(steps):
+            sigma      = sigmas[i].item()
+            sigma_next = sigmas[i + 1].item()
 
-        if callback is not None:
-            callback({
-                "x":         x,
-                "i":         i,
-                "sigma":     sigmas[i],
-                "sigma_hat": sigmas[i],
-                "denoised":  denoised,
-            })
+            t0 = time.perf_counter()
+            denoised = model(x, sigma * s_in, **extra_args)
+            if x.is_cuda:
+                torch.cuda.synchronize()
+            elapsed = time.perf_counter() - t0
 
-        x = _euler_dmd_step(x, sigma, sigma_next, denoised)
+            if callback is not None:
+                callback({
+                    "x":         x,
+                    "i":         i,
+                    "sigma":     sigmas[i],
+                    "sigma_hat": sigmas[i],
+                    "denoised":  denoised,
+                })
+
+            x = _euler_dmd_step(x, sigma, sigma_next, denoised)
+
+            pbar_tqdm.update(1)
+            if elapsed >= 1.0:
+                pbar_tqdm.set_postfix({"s/it": f"{elapsed:.2f}"})
+            else:
+                pbar_tqdm.set_postfix({"it/s": f"{1.0 / elapsed:.2f}"})
+            pbar.update(1)
+    finally:
+        pbar_tqdm.close()
 
     return x
 

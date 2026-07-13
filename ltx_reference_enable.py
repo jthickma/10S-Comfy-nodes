@@ -101,6 +101,23 @@ def _patched_process_input(self, x, keyframe_idxs, denoise_mask, **kwargs):
             or transformer_options.get("memory_position_mode") \
             or "reference"
 
+    # NEW (v1.1): source_id and phase_scale for RoPE source-phase tagging.
+    # Best-Face-ID LoRA expects source_id=2, phase_scale=1.0.
+    # Read from kwargs first, then nested transformer_options.
+    source_id = kwargs.get("reference_source_id")
+    if source_id is None and isinstance(transformer_options, dict):
+        source_id = transformer_options.get("reference_source_id")
+    if source_id is None:
+        source_id = 0.0
+    source_id = float(source_id)
+
+    phase_scale = kwargs.get("reference_phase_scale")
+    if phase_scale is None and isinstance(transformer_options, dict):
+        phase_scale = transformer_options.get("reference_phase_scale")
+    if phase_scale is None:
+        phase_scale = 1.0
+    phase_scale = float(phase_scale)
+
     # Always run the original first
     result = _ORIGINAL_PROCESS_INPUT(self, x, keyframe_idxs, denoise_mask, **kwargs)
     tokens_list, coords_list, additional_args = result
@@ -183,14 +200,42 @@ def _patched_process_input(self, x, keyframe_idxs, denoise_mask, **kwargs):
         _log(f"pixel coords failed: {type(e).__name__}: {e}")
         return result
 
-    # Optional: shift positions for prefix_continuous mode
-    if position_mode == "prefix_continuous":
+    # Position shifts based on placement mode
+    if position_mode == "prefix_continuous" or position_mode == "prefix":
+        # Reference precedes target temporally
         try:
             ref_temporal_end = float(ref_pixel_coords[:, 0, :, 1].max().item())
             ref_pixel_coords = ref_pixel_coords.clone()
             ref_pixel_coords[:, 0, :, :] -= ref_temporal_end
         except Exception as e:
-            _log(f"prefix_continuous offset failed: {type(e).__name__}: {e}")
+            _log(f"prefix offset failed: {type(e).__name__}: {e}")
+    elif position_mode == "i2v_safe":
+        # NEW: reference occupies negative temporal region, avoiding both
+        # target frame 0 (i2v conditioning) and the target frame range.
+        # Combined with source_id tagging, attention still identifies these
+        # as reference tokens despite the position offset.
+        try:
+            ref_temporal_end = float(ref_pixel_coords[:, 0, :, 1].max().item())
+            ref_pixel_coords = ref_pixel_coords.clone()
+            ref_pixel_coords[:, 0, :, 1] -= (ref_temporal_end + 1.0)
+        except Exception as e:
+            _log(f"i2v_safe offset failed: {type(e).__name__}: {e}")
+
+    # Apply RoPE source-phase tag (Best-Face-ID convention).
+    # Multiplicative phase applied to the temporal coordinate so reference
+    # tokens live in a rotationally-distinct slice of RoPE space.  Runs
+    # AFTER position shifts so it composes correctly.
+    if source_id != 0.0 and phase_scale != 0.0:
+        try:
+            temporal = ref_pixel_coords[:, 0, :, 1]
+            max_t = float(temporal.max().item()) if temporal.numel() > 0 else 1.0
+            phase_offset = source_id * phase_scale * (max_t + 1.0)
+            ref_pixel_coords = ref_pixel_coords.clone()
+            ref_pixel_coords[:, 0, :, 1] = ref_pixel_coords[:, 0, :, 1] + phase_offset
+            _log(f"applied source_phase: id={source_id}, scale={phase_scale}, "
+                 f"offset={phase_offset:.2f}")
+        except Exception as e:
+            _log(f"source_phase apply failed: {type(e).__name__}: {e}")
 
     # Apply patchify_proj
     try:
