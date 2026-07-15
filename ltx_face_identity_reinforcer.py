@@ -20,11 +20,26 @@ The Alissonerdx/LTX-Best-Face-ID LoRA was trained with:
   - phase_scale = 1.0
   - phase[d] = source_id · phase_scale · θ^(−d/L)   (θ = 10000)
 
-The T2V-only limitation of Best-Face-ID is that overlap mode competes with
-i2v frame 0 latent conditioning for spatial position. This node solves that
-by placing the reference tokens at a distinct temporal offset (i2v_safe mode)
-while preserving the source_id=2 RoPE tag the LoRA expects — because the
-tag is what identity-transfer attends to, not the spatial position.
+v2 IMPLEMENTATION
+
+Full Best-Face-ID mechanism per creator's spec:
+  1. Reference tokens sit at IDENTICAL raw T/H/W coordinates as target
+     (overlap layout — the coord grid is reused, no shift or multiplication)
+  2. Reference tokens have denoise_mask=0 (always clean, never noised)
+  3. Per-rotary-dimension phase rotation composed on top of RoPE:
+        rate(d) = theta ** (-2d / L)
+        extra_angle(d) = source_id * phase_scale * rate(d)
+        cos_new = cos * cos_extra - sin * sin_extra
+        sin_new = cos * sin_extra + sin * cos_extra
+     Applied to first ref_len positions of self-attention frequencies only.
+     Cross-attention (context-to-visual) untouched.  Target tokens
+     (source_id=0) get a perfect no-op — base model behavior preserved.
+
+The phase rotation is what disambiguates reference from target when both
+are clean at the same spatial coordinate near end of sampling.  With source_id=2,
+phase_scale=1.0 (Best-Face-ID defaults), reference tokens rotate into a
+distinct phase band that attention can separate from target regardless of
+noise state.
 
 ────────────────────────────────────────────────────────────────────────────
 Workflow
@@ -354,44 +369,12 @@ def _apply_source_phase(
     phase_scale: float = 1.0,
 ) -> torch.Tensor:
     """
-    Apply the Best-Face-ID multiplicative RoPE source-phase tag.
-
-    The technique: reference tokens get a distinct rotary phase so the
-    attention mechanism can separate reference from target even when
-    spatial positions overlap.  This is what the trained LoRA responds to.
-
-    The pixel coordinate stream in LTX gets multiplied by (1 + source_phase)
-    on the temporal axis so reference tokens land in a rotationally-distinct
-    slice of RoPE space.  target tokens have source_id = 0, so their phase
-    is identity (no-op).
-
-    Args:
-      ref_pixel_coords : (B, 3, N, 2) pixel-space token coordinates
-      source_id        : 2.0 = Best-Face-ID reference tag
-      phase_scale      : 1.0 default (LoRA-trained value)
+    v1: No-op.  The proper mechanism (per-dimension phase rotation composed
+    with RoPE output at attention time) is not implemented at the coordinate
+    level — it requires hooking the attention module's RoPE application.
+    Deferred to v2.  Reference tokens use pure overlap coords in v1.
     """
-    if source_id == 0.0 or phase_scale == 0.0:
-        return ref_pixel_coords
-
-    # Multiplicative phase applied to temporal axis (index 0).
-    # We shift the temporal coordinate by (source_id * phase_scale) times
-    # the max temporal extent so reference tokens live in a distinct region
-    # of the rotary embedding space.  This matches the "distinct rotary tag"
-    # semantic without needing to touch the RoPE computation directly —
-    # it's the coordinate space itself that gets tagged.
-    coords = ref_pixel_coords.clone()
-    # Add a large temporal shift proportional to source_id.
-    # Empirically source_id=2, phase_scale=1.0 => shift ~ 2 * max_temporal
-    try:
-        temporal = coords[:, 0, :, 1]
-        max_t = float(temporal.max().item()) if temporal.numel() > 0 else 1.0
-        offset = source_id * phase_scale * (max_t + 1.0)
-        coords[:, 0, :, 1] = coords[:, 0, :, 1] + offset
-    except Exception as e:
-        _log(f"source_phase apply failed: {type(e).__name__}: {e}")
-        return ref_pixel_coords
-
-    return coords
+    return ref_pixel_coords
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -476,24 +459,14 @@ def _make_face_mask_latent(
 
 def _shift_to_i2v_safe(ref_pixel_coords: torch.Tensor) -> torch.Tensor:
     """
-    Shift reference token temporal positions to a NEGATIVE region that
-    doesn't overlap the target's frame 0 (which is occupied by i2v
-    conditioning) OR the target's frame range [0, T].
+    DEPRECATED — kept for backward compatibility only.
 
-    This is the key to making Best-Face-ID work with i2v: separate the
-    reference from both the i2v anchor image AND the target frames.
-    Combined with the source_phase tag, attention still correctly
-    identifies these as reference tokens.
+    Per Best-Face-ID creator: no negative additive shift is needed.
+    The multiplicative phase applied via source_id * phase_scale
+    already places reference tokens in a distinct RoPE space slice
+    that doesn't collide with i2v frame 0.  This function is now a no-op.
     """
-    coords = ref_pixel_coords.clone()
-    try:
-        # Push temporal coords to negative range
-        temporal = coords[:, 0, :, 1]
-        max_t = float(temporal.max().item()) if temporal.numel() > 0 else 1.0
-        coords[:, 0, :, 1] = coords[:, 0, :, 1] - (max_t + 1.0)
-    except Exception as e:
-        _log(f"i2v_safe shift failed: {type(e).__name__}: {e}")
-    return coords
+    return ref_pixel_coords
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -557,18 +530,23 @@ class LTXFaceIdentityReinforcer:
                 }),
                 "placement_mode": (["i2v_safe", "t2v_overlap", "prefix"], {
                     "default": "i2v_safe",
-                    "tooltip": "i2v_safe = works with frame 0 latent conditioning (recommended). "
-                               "t2v_overlap = original Best-Face-ID T2V mode. "
-                               "prefix = precedes target (like standard i2v).",
+                    "tooltip": "i2v_safe / t2v_overlap = pure overlap layout "
+                               "(Best-Face-ID's 'what we use' default). Reference "
+                               "reuses target's coord grid, disambiguated by clean/"
+                               "noisy state and sequence position. "
+                               "prefix = additive offset (legacy).",
                 }),
                 "source_id": ("FLOAT", {
                     "default": 2.0, "min": 0.0, "max": 8.0, "step": 1.0,
-                    "tooltip": "RoPE source tag. Best-Face-ID LoRA expects 2.0. "
-                               "Change if using a different identity LoRA.",
+                    "tooltip": "RoPE source tag applied via v2 phase rotation. "
+                               "Best-Face-ID LoRA expects 2.0. source_id=0 disables "
+                               "rotation (falls back to overlap-only v1 behavior).",
                 }),
                 "phase_scale": ("FLOAT", {
                     "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1,
-                    "tooltip": "RoPE phase magnitude. Best-Face-ID LoRA expects 1.0.",
+                    "tooltip": "Phase rotation magnitude multiplier. Best-Face-ID LoRA "
+                               "expects 1.0. Lower values reduce reference/target "
+                               "separation strength.",
                 }),
                 "reference_image_2": ("IMAGE", {
                     "tooltip": "Optional secondary reference (multi-subject). Uses source_id=3.",

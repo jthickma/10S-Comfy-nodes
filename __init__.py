@@ -65,6 +65,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_NDM_CALIB,
 }
 
-__version__ = "1.9.4"
+__version__ = "1.9.5"
 WEB_DIRECTORY = "./web"
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY', '__version__']
